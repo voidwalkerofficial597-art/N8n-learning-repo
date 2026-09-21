@@ -1,0 +1,11 @@
+# Temporal dynamic config for SQL (Postgres) persistence.
+# Same values as Postiz's official docker-compose:
+# https://github.com/gitroomhq/postiz-docker-compose/blob/main/dynamicconfig/development-sql.yaml
+#
+# Temporal re-reads this file periodically; no restart needed for most keys.
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true # Dev setup only. Please don't turn this on in production.
+    constraints: {}

@@ -1,0 +1,17 @@
+# Never commit real secrets. Put provider keys in the Render dashboard (Environment tab).
+.env
+.env.*
+!.env.example
+*.env
+!providers.env.example
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Python (validator script)
+__pycache__/
+.venv/

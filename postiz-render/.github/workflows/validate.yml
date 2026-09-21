@@ -1,0 +1,35 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: render.yaml schema + shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validator deps
+        run: pip install --quiet jsonschema pyyaml
+
+      - name: Validate render.yaml against Render's schema
+        run: python scripts/validate-render-yaml.py render.yaml
+
+      - name: Shell syntax check
+        run: |
+          bash -n postiz/entrypoint.sh
+          bash -n postiz/patch-cookie-domain.sh
+          bash -n temporal/entrypoint.sh
+          bash -n scripts/create-private-repo.sh
+
+      - name: Line endings must be LF
+        run: |
+          if grep -rl $'\r' postiz/ temporal/ scripts/; then
+            echo "CRLF line endings found (would break container start)"; exit 1
+          fi

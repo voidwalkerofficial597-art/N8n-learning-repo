@@ -1,0 +1,198 @@
+# =============================================================================
+#  Postiz on Render — Blueprint (Infrastructure as Code)
+#  Docs: https://render.com/docs/blueprint-spec
+# =============================================================================
+#
+#  Resources created by this file:
+#
+#    postiz            Web service  (Docker)  Postiz app: frontend + backend + orchestrator (port 5000)
+#    postiz-temporal   Private svc  (Docker)  Temporal server (required by Postiz >= v2.12.0)
+#    postiz-redis      Key Value              Redis (cache / rate-limit / OAuth state)
+#    postiz-db         Postgres               One instance, three databases:
+#                                               postiz              -> Postiz (Prisma)
+#                                               temporal            -> Temporal persistence
+#                                               temporal_visibility -> Temporal visibility
+#
+#  IMPORTANT: all resources must be in the SAME region (they talk over the private network).
+#  Change `region` everywhere at once if you want another region (oregon | ohio | virginia | frankfurt | singapore).
+#
+#  Estimated cost (Sept 2026 list prices):  1c-2g $25 + 0.5c-512mb $7 + 0.1c-256mb $6 + 5 GB disk $1.25 + free Redis
+#  = ~$39 / month.  Postiz itself needs ~1.5 GB RAM, so the 512 MB plans will NOT work for the `postiz` service.
+#
+services:
+  # ---------------------------------------------------------------------------
+  # Postiz (public web service)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: postiz
+    runtime: docker
+    region: singapore
+    plan: 1c-2g                      # minimum that runs Postiz reliably (2 GB RAM)
+    dockerfilePath: ./postiz/Dockerfile
+    dockerContext: ./postiz
+    healthCheckPath: /               # nginx -> Next.js; 2xx/3xx = healthy
+    maxShutdownDelaySeconds: 60
+    buildFilter:
+      paths:
+        - postiz/**
+    disk:                            # media uploads (STORAGE_PROVIDER=local)
+      name: postiz-uploads
+      mountPath: /uploads
+      sizeGB: 5
+    envVars:
+      # --- Postiz version (Render passes env vars as Docker build args -> used in postiz/Dockerfile) ---
+      - key: POSTIZ_VERSION
+        value: v2.23.0               # https://github.com/gitroomhq/postiz-app/releases
+
+      # --- Port routing: Render sends public traffic to $PORT. nginx inside the image listens on 5000.
+      #     (postiz/entrypoint.sh re-pins PORT=3000 for the Nest backend, which nginx proxies to.)
+      - key: PORT
+        value: 5000
+
+      # --- Required core -------------------------------------------------------
+      - key: DATABASE_URL
+        fromDatabase:
+          name: postiz-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: postiz-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: BACKEND_INTERNAL_URL
+        value: http://localhost:3000
+      # MAIN_URL / FRONTEND_URL / NEXT_PUBLIC_BACKEND_URL are derived automatically from
+      # RENDER_EXTERNAL_URL (https://<service>.onrender.com) by postiz/entrypoint.sh.
+      # Custom domain?  Add  MAIN_URL=https://your-domain.com  in the Render dashboard (Environment tab).
+
+      # --- Temporal (workflow engine) -----------------------------------------
+      - key: TEMPORAL_HOST                 # private hostname of the Temporal service
+        fromService:
+          type: pserv
+          name: postiz-temporal
+          property: host
+      - key: TEMPORAL_PORT
+        value: 7233
+      - key: TEMPORAL_NAMESPACE
+        value: default
+
+      # --- Application behaviour --------------------------------------------
+      - key: IS_GENERAL                    # required for self-hosting
+        value: "true"
+      - key: DISABLE_REGISTRATION          # first signup allowed, then sign-up page closes
+        value: "true"
+      - key: RUN_CRON                      # run scheduled-task workers in this (single) instance
+        value: "true"
+      - key: DISALLOW_PLUS                 # hide "upgrade to paid plan" UI (cloud-only)
+        value: "true"
+
+      # --- Storage: local disk (mounted above). For Cloudflare R2 see README. ---
+      - key: STORAGE_PROVIDER
+        value: local
+      - key: UPLOAD_DIRECTORY
+        value: /uploads
+      - key: NEXT_PUBLIC_UPLOAD_DIRECTORY
+        value: /uploads
+
+      # --- Optional: add these in the Render dashboard (Environment tab), NOT here ---
+      #   OPENAI_API_KEY                         AI features
+      #   RESEND_API_KEY, EMAIL_FROM_ADDRESS     e-mails (activation, invites)
+      #   X_API_KEY / X_API_SECRET               X (Twitter)
+      #   LINKEDIN_CLIENT_ID / _SECRET           LinkedIn
+      #   FACEBOOK_APP_ID / _SECRET              Facebook + Instagram
+      #   THREADS_APP_ID / _SECRET               Threads
+      #   YOUTUBE_CLIENT_ID / _SECRET            YouTube
+      #   TIKTOK_CLIENT_ID / _SECRET             TikTok
+      #   REDDIT_CLIENT_ID / _SECRET             Reddit
+      #   PINTEREST_CLIENT_ID / _SECRET          Pinterest
+      #   DISCORD_CLIENT_ID / _SECRET / DISCORD_BOT_TOKEN_ID
+      #   SKIP_COOKIE_PATCH=true                 build without postiz/patch-cookie-domain.sh (custom domain only)
+      #   ... full list: providers.env.example + https://docs.postiz.com/self-host/configuration/reference
+
+  # ---------------------------------------------------------------------------
+  # Temporal server (private — only reachable from your other Render services)
+  # ---------------------------------------------------------------------------
+  - type: pserv
+    name: postiz-temporal
+    runtime: docker
+    region: singapore
+    plan: 0.5c-512mb                 # enough for a single-user Postiz; bump to 1c-2g if it OOMs
+    dockerfilePath: ./temporal/Dockerfile
+    dockerContext: ./temporal
+    maxShutdownDelaySeconds: 60
+    buildFilter:
+      paths:
+        - temporal/**
+    envVars:
+      - key: TEMPORAL_VERSION            # Docker build arg -> temporalio/auto-setup:<version>
+        value: 1.28.1
+      - key: PORT                        # Temporal frontend gRPC port (Render health-checks this port)
+        value: 7233
+
+      # --- Postgres (same instance as Postiz; Temporal creates its own databases) ---
+      - key: DB
+        value: postgres12
+      - key: POSTGRES_SEEDS
+        fromDatabase:
+          name: postiz-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: postiz-db
+          property: port
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: postiz-db
+          property: user
+      - key: POSTGRES_PWD
+        fromDatabase:
+          name: postiz-db
+          property: password
+      - key: ADMIN_DB                    # existing DB used to run CREATE DATABASE for the two below
+        fromDatabase:
+          name: postiz-db
+          property: database
+      - key: DBNAME
+        value: temporal
+      - key: VISIBILITY_DBNAME
+        value: temporal_visibility
+
+      # --- Tuning for a small Postgres plan (~97-connection limit on 0.1c-256mb).
+      #     Temporal opens one pool per internal service (frontend/history/matching/worker),
+      #     so the worst case is ~4x SQL_MAX_CONNS + 3x SQL_VIS_MAX_CONNS. ---
+      - key: SQL_MAX_CONNS
+        value: 10
+      - key: SQL_MAX_IDLE_CONNS
+        value: 5
+      - key: SQL_VIS_MAX_CONNS
+        value: 5
+      - key: SQL_VIS_MAX_IDLE_CONNS
+        value: 2
+      - key: NUM_HISTORY_SHARDS         # cannot be changed after first start
+        value: 4
+      - key: LOG_LEVEL
+        value: info
+
+  # ---------------------------------------------------------------------------
+  # Redis (Render Key Value)
+  # ---------------------------------------------------------------------------
+  - type: keyvalue
+    name: postiz-redis
+    region: singapore
+    plan: free                       # 25 MB, no persistence (fine for cache). Paid: 256mb ($10/mo)
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []                  # internal connections only
+
+# -----------------------------------------------------------------------------
+# Postgres
+# -----------------------------------------------------------------------------
+databases:
+  - name: postiz-db
+    region: singapore
+    plan: 0.1c-256mb                 # $6/mo. `free` works for a 30-day trial (then it EXPIRES and is deleted)
+    postgresMajorVersion: "17"
+    databaseName: postiz
+    user: postiz
+    diskSizeGB: 5

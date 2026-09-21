@@ -1,0 +1,4 @@
+# Only the two scripts are needed in the build context.
+*
+!entrypoint.sh
+!patch-cookie-domain.sh

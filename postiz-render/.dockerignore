@@ -1,0 +1,12 @@
+# Docker build context se ye cheezein hata do (fast build + chhota context)
+.git
+.github
+.gitignore
+docs
+scripts
+*.md
+.env
+.env.*
+!.env.example
+docker-compose.local.yml
+render.yaml

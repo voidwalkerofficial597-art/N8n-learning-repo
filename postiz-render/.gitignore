@@ -1,0 +1,18 @@
+# Secrets — kabhi commit na karo
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Backups / dumps
+*.dump
+*.sql
+backups/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,167 @@
+# =============================================================================
+#  Postiz on Render — Render Blueprint (Infrastructure as Code)
+# =============================================================================
+#  Kaise deploy karein:
+#    1. Ye repo GitHub par PRIVATE hona chahiye (Render private repo support karta hai)
+#    2. Render Dashboard -> New + -> Blueprint -> repo select karo -> Apply
+#    3. Jo env vars "sync: false" hain, unki value Render poochega (R2 keys)
+#    4. Deploy ke baad URL auto-set ho jata hai (entrypoint RENDER_EXTERNAL_URL use karta hai)
+#    5. Pehla signup karne ke baad DISABLE_REGISTRATION=true kar dena (docs/05)
+#
+#  ⚠️ AGAR ye file repo ke root me NAHI hai (jaise `postiz-render/render.yaml`),
+#     to har service ke dockerfilePath / dockerContext me prefix laga do:
+#       dockerfilePath: ./postiz-render/Dockerfile
+#       dockerContext:  ./postiz-render
+#       dockerfilePath: ./postiz-render/temporal/Dockerfile
+#
+#  Docs: https://render.com/docs/blueprint-spec
+# =============================================================================
+
+databases:
+  # Postiz ka main data (users, posts, channels...) — Prisma schema push khud hota hai
+  - name: postiz-db
+    databaseName: postiz
+    user: postiz
+    region: singapore
+    # plan: free          # ⚠️ free Postgres 30 DIN baad DELETE ho jata hai -> sirf testing
+    plan: 0.1c-256mb      # ~$7/mo (paid basic). Max 100 connections.
+    diskSizeGB: 15
+    # ipAllowList: []     # (optional) uncomment = sirf private network se access,
+    #                     # lekin phir laptop se pg_dump/psql nahi kar paoge
+
+  # Temporal ka apna data (workflow history) — Postiz ke DB se alag rakhna better hai
+  - name: temporal-db
+    databaseName: temporaldb      # auto-setup isme `temporal` + `temporal_visibility` khud banata hai
+    user: temporaldb
+    region: singapore
+    plan: 0.1c-256mb
+    diskSizeGB: 15
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1) Postiz app — nginx + frontend + backend + temporal worker (ek hi container)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: postiz
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    region: singapore          # India ke liye sabse paas wala Render region
+    plan: 1c-2g                # 1 CPU / 2 GB = ~$25/mo. Postiz ko minimum 2GB chahiye.
+                               # (0.5c-512mb sasta hai par OOM/crash hoga)
+    healthCheckPath: /healthz     # wrapper entrypoint nginx me ye endpoint add karta hai
+    maxShutdownDelaySeconds: 120
+    autoDeployTrigger: commit  # git push -> auto deploy
+    envVars:
+      # Render is port par traffic bhejta hai (wrapper entrypoint nginx ko isi par le jata hai)
+      - key: PORT
+        value: 10000
+
+      # --- Public URLs ---------------------------------------------------------
+      # Khaali chhod do: entrypoint RENDER_EXTERNAL_URL se auto-derive kar lega.
+      # Custom domain lagana ho to yahan value set karo:
+      #   MAIN_URL: https://postiz.yourdomain.com
+      # - key: MAIN_URL
+      #   value: https://postiz.yourdomain.com
+
+      # --- Secrets -------------------------------------------------------------
+      - key: JWT_SECRET
+        generateValue: true    # Render khud ek random 256-bit secret bana dega
+
+      # --- Data stores (Render ke internal URLs) -------------------------------
+      - key: DATABASE_URL
+        fromDatabase:
+          name: postiz-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: postiz-redis
+          property: connectionString
+      - key: TEMPORAL_ADDRESS
+        fromService:
+          type: pserv
+          name: temporal
+          property: hostport     # -> "temporal-xxxx:7233"
+
+      # --- Self-hosting essentials ---------------------------------------------
+      - key: BACKEND_INTERNAL_URL
+        value: http://localhost:3000
+      - key: IS_GENERAL
+        value: "true"
+      - key: RUN_CRON
+        value: "true"
+      - key: DISABLE_REGISTRATION
+        value: "false"          # pehla account bana lo, phir "true" kar do (docs/05)
+      - key: UPLOAD_DIRECTORY
+        value: /uploads
+      - key: NEXT_PUBLIC_UPLOAD_DIRECTORY
+        value: /uploads
+
+      # --- Storage: Cloudflare R2 (FREE 10 GB) ---------------------------------
+      # Agar Render persistent disk use karna hai to: STORAGE_PROVIDER=local karo,
+      # aur neeche wala `disk:` block uncomment karo (paid plan par hi milega).
+      - key: STORAGE_PROVIDER
+        value: cloudflare
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_ACCESS_KEY
+        sync: false
+      - key: CLOUDFLARE_SECRET_ACCESS_KEY
+        sync: false
+      - key: CLOUDFLARE_BUCKETNAME
+        sync: false
+      - key: CLOUDFLARE_BUCKET_URL
+        sync: false
+      - key: CLOUDFLARE_REGION
+        sync: false
+
+      # --- Optional: AI features (dashboard me baad me add kar sakte ho) -------
+      # - key: OPENAI_API_KEY
+      #   sync: false
+
+    # Render persistent disk — chahiye to uncomment karo (paid service only)
+    # disk:
+    #   name: postiz-uploads
+    #   mountPath: /uploads
+    #   sizeGB: 5
+
+  # ---------------------------------------------------------------------------
+  # 2) Temporal server — Postiz v2.12+ ke liye ZAROORI
+  #    Elasticsearch ke BINA (SQL visibility) -> halka aur sasta
+  # ---------------------------------------------------------------------------
+  - type: pserv
+    name: temporal
+    runtime: docker
+    dockerfilePath: ./temporal/Dockerfile
+    dockerContext: .
+    region: singapore
+    plan: 0.5c-512mb           # ~$7/mo. Workflows zyada ho to 1c-2g kar dena.
+    envVars:
+      # Render ko batao ki service 7233 par hai -> postiz ke TEMPORAL_ADDRESS
+      # reference (hostport) se "temporal-xxxx:7233" milta hai.
+      - key: PORT
+        value: 7233
+      - key: TEMPORAL_DATABASE_URL
+        fromDatabase:
+          name: temporal-db
+          property: connectionString
+      - key: DB
+        value: postgres12
+      - key: ENABLE_ES
+        value: "false"         # Elasticsearch ki zaroorat nahi (Postgres visibility)
+      - key: BIND_ON_IP
+        value: 0.0.0.0         # private network par reachable rahe
+      - key: DBNAME
+        value: temporal
+      - key: VISIBILITY_DBNAME
+        value: temporal_visibility
+
+  # ---------------------------------------------------------------------------
+  # 3) Redis (Render Key Value) — Postiz cache/queues ke liye
+  # ---------------------------------------------------------------------------
+  - type: keyvalue
+    name: postiz-redis
+    region: singapore
+    plan: free                 # 25 MB, 50 connections. Chhota lage to: plan: 256mb (~$10/mo)
+    ipAllowList: []            # sirf private network se (Render requirement: ye field must hai)
